@@ -31,6 +31,12 @@ class Allocator : public BnAllocator {
     ndk::ScopedAStatus isSupported(const BufferDescriptorInfo& descriptor,
                                 bool* outResult) override;
 
+    ndk::ScopedAStatus isMultiViewSupported(const std::vector<BufferDescriptorInfo>& descriptor,
+                                            int32_t baseViewIndex, bool* outResult) override;
+
+    ndk::ScopedAStatus allocateMultiView(const std::vector<BufferDescriptorInfo>& descriptor,
+                                         int32_t baseViewIndex, allocator::AllocationResult* outResult) override;
+
     ndk::ScopedAStatus getIMapperLibrarySuffix(std::string* outResult) override;
 
   protected:

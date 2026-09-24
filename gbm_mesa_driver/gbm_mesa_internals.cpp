@@ -16,6 +16,9 @@
 
 #define LOG_TAG "GBM-MESA-GRALLOC"
 
+#include <assert.h>
+#include <functional>
+
 extern "C" {
 #include "drv_helpers.h"
 }

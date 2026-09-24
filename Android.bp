@@ -114,7 +114,9 @@ cc_defaults {
         "minigbm_headers",
     ],
 
-    static_libs: ["libarect", "libhbm_minigbm"],
+    // libhbm_minigbm (ChromeOS HBM allocator) is not in AOSP; only needed
+    // with -DDRV_HBM_HELPER, which pc_x86_64 does not use.
+    static_libs: ["libarect"],
 
     vendor: true,
 
@@ -125,7 +127,7 @@ cc_defaults {
         "libnativewindow",
         "libsync",
         "liblog",
-        "android.hardware.graphics.common-V5-ndk",
+        "android.hardware.graphics.common-V7-ndk",
     ],
 }
 
@@ -154,6 +156,7 @@ cc_defaults {
 
 cc_library {
     name: "libgbm",
+    min_sdk_version: "apex_inherit",
     defaults: ["minigbm_defaults"],
     host_supported: true,
 
@@ -196,6 +199,7 @@ cc_library {
 rust_bindgen {
     name: "libgbm_sys",
     crate_name: "gbm_sys",
+    min_sdk_version: "34",
     wrapper_src: "rust/gbm_wrapper.h",
     source_stem: "bindings",
     bindgen_flags: [
@@ -216,6 +220,7 @@ rust_bindgen {
     visibility: [
         "//external/rust/android-crates-io/crates/gbm",
         "//system/cros-codecs",
+        "//system/desktop/cros-codecs",
     ],
 }
 
@@ -224,11 +229,10 @@ cc_library_shared {
     name: "libminigbm_gralloc",
     defaults: ["minigbm_cros_gralloc_library_defaults"],
     include_dirs: ["external/libdrm/amdgpu",
-                    "external/mesa/include",
-                    "external/mesa/src/gallium/drivers/svga/include"],
+                    "external/mesa3d/include",
+                    "external/mesa3d/src/gallium/drivers/svga/include"],
     cflags: ["-DHAS_DMABUF_SYSTEM_HEAP",
                   "-DDRV_AMDGPU",
-                  "-DDRV_HBM_HELPER",
                   "-DDRV_VMWGFX",
                   "-DDRV_I915",
                   "-DDRV_XE",],
@@ -247,6 +251,8 @@ cc_library_headers {
     export_include_dirs: ["cros_gralloc"],
     visibility: [
         "//device/generic/goldfish-opengl/system/hwc3:__subpackages__",
+        // Current AOSP location of the emulator HWC3 (as in AOSP's minigbm)
+        "//device/generic/goldfish/hals/hwc3:__subpackages__",
     ],
 }
 

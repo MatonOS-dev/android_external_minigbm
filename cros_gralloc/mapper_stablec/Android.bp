@@ -29,8 +29,15 @@ cc_library_shared {
     vintf_fragments: ["mapper.minigbm.xml"],
     shared_libs: [
         "android.hardware.graphics.allocator-V2-ndk",
-        "libminigbm_gralloc",
-    ],
+    ] + select(soong_config_variable("minigbm", "backend"), {
+        // Allocate through Mesa's GBM (gbm_mesa_driver/) for any Mesa GPU.
+        "gbm_mesa": ["libminigbm_gralloc_gbm_mesa"],
+        default: ["libminigbm_gralloc"],
+    }),
+    cflags: select(soong_config_variable("minigbm", "backend"), {
+        "gbm_mesa": ["-DDRV_EXTERNAL"],
+        default: [],
+    }),
     header_libs: [
         "libbase_headers",
         "libimapper_stablec",

@@ -31,16 +31,19 @@ cc_binary {
     vintf_fragments: ["allocator.xml"],
     vendor: true,
     shared_libs: [
-        "android.hardware.graphics.allocator-V2-ndk",
+        "android.hardware.graphics.allocator-V3-ndk",
         "android.hardware.graphics.mapper@4.0",
         "libbase",
         "libbinder_ndk",
         "libgralloctypes",
         "libhidlbase",
         "liblog",
-        "libminigbm_gralloc",
         "libminigbm_gralloc4_utils",
-    ],
+    ] + select(soong_config_variable("minigbm", "backend"), {
+        // Allocate through Mesa's GBM (gbm_mesa_driver/) for any Mesa GPU.
+        "gbm_mesa": ["libminigbm_gralloc_gbm_mesa"],
+        default: ["libminigbm_gralloc"],
+    }),
     static_libs: [
         "libaidlcommonsupport",
     ],
