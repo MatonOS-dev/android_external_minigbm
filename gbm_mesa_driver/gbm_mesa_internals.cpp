@@ -28,10 +28,12 @@ extern "C" {
 #include "UniqueFd.h"
 #include "drv_priv.h"
 #include "util.h"
+#include "external/dma-heap.h"
 #include <algorithm>
 #include <array>
 #include <cutils/properties.h>
 #include <dlfcn.h>
+#include <drm_fourcc.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <gbm.h>
@@ -43,6 +45,7 @@ extern "C" {
 #include <string.h>
 #include <string>
 #include <sys/mman.h>
+#include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
 #include <sys/types.h>
@@ -109,6 +112,7 @@ struct GbmMesaDriver {
 
 	UniqueFd gbm_node_fd;
 	UniqueFd gpu_node_fd;
+	UniqueFd system_heap_fd;
 	bool software_gpu = false;
 };
 
@@ -241,6 +245,16 @@ static std::shared_ptr<GbmMesaDriver> gbm_mesa_get_or_init_driver(struct driver 
 			    version && std::string(version->name) == "vgem";
 			if (version)
 				drmFreeVersion(version);
+		}
+		if (gbm_mesa_drv->software_gpu) {
+			// vgem supplies the software renderer's DRM/PRIME interface but does
+			// not allocate GEM buffers. Allocate linear storage from dma_heap.
+			gbm_mesa_drv->system_heap_fd =
+			    UniqueFd(open("/dev/dma_heap/system", O_RDONLY | O_CLOEXEC));
+			if (!gbm_mesa_drv->system_heap_fd) {
+				drv_loge("Unable to open the system dma-buf heap: %s", strerror(errno));
+				return nullptr;
+			}
 		}
 
 		if (look_for_kms && !mapper_sphal) {
@@ -459,12 +473,40 @@ int gbm_mesa_bo_create2(struct bo *bo, uint32_t width, uint32_t height, uint32_t
 		alloc_args.force_linear = true;
 	}
 
-	err = wr->alloc(&alloc_args);
+	if (software_gpu) {
+		// vgem is a render-only GEM service and has no BO creation ioctl. A
+		// normal gbm_bo_create() on its fd fails, including for small linear
+		// client targets. System-heap dma-bufs are CPU-mappable by llvmpipe and
+		// PRIME-importable by vgem and the display KMS driver.
+		uint32_t stride = drv_stride_from_format(alloc_args.drm_format,
+							 alloc_args.width, 0);
+		if (drv_bo_from_format(bo, stride, 1, alloc_args.height,
+				       alloc_args.drm_format) != 0) {
+			drv_loge("Unable to compute system-heap buffer layout");
+			return -EINVAL;
+		}
 
-	if (err && !scanout_strong) {
-		drv_loge("Failed to allocate for scanout, trying non-scanout");
-		alloc_args.use_scanout = false;
+		struct dma_heap_allocation_data heap_data = {
+		    .len = ALIGN(bo->meta.total_size, 4096),
+		    .fd_flags = O_RDWR | O_CLOEXEC,
+		};
+		if (ioctl(drv->system_heap_fd.Get(), DMA_HEAP_IOCTL_ALLOC, &heap_data) != 0) {
+			drv_loge("System dma-buf heap allocation failed: %s", strerror(errno));
+			return -errno;
+		}
+
+		alloc_args.out_fd = static_cast<int>(heap_data.fd);
+		alloc_args.out_stride = stride;
+		alloc_args.out_modifier = DRM_FORMAT_MOD_LINEAR;
+		alloc_args.out_map_stride = stride;
+	} else {
 		err = wr->alloc(&alloc_args);
+
+		if (err && !scanout_strong) {
+			drv_loge("Failed to allocate for scanout, trying non-scanout");
+			alloc_args.use_scanout = false;
+			err = wr->alloc(&alloc_args);
+		}
 	}
 
 	if (err) {
@@ -488,7 +530,13 @@ int gbm_mesa_bo_create2(struct bo *bo, uint32_t width, uint32_t height, uint32_t
 	auto priv = new GbmMesaBoPriv();
 	bo->inode = drv_get_inode(alloc_args.out_fd);
 	for (size_t plane = 0; plane < bo->meta.num_planes; plane++) {
-		priv->fds[plane] = UniqueFd(alloc_args.out_fd);
+		int plane_fd = plane == 0 ? alloc_args.out_fd : dup(alloc_args.out_fd);
+		if (plane_fd < 0) {
+			drv_loge("Unable to duplicate plane fd: %s", strerror(errno));
+			delete priv;
+			return -errno;
+		}
+		priv->fds[plane] = UniqueFd(plane_fd);
 	}
 
 	priv->map_stride = alloc_args.out_map_stride;
@@ -520,8 +568,9 @@ int gbm_mesa_bo_import(struct bo *bo, struct drv_import_fd_data *data)
 static int gbm_mesa_gbm_bo_import(struct bo *bo)
 {
 	auto priv = (GbmMesaBoPriv *)bo->priv;
-
 	auto drv = gbm_mesa_get_or_init_driver(bo->drv, true);
+	if (drv == nullptr)
+		return -EINVAL;
 	auto wr = drv->wrapper;
 
 	uint32_t s_format = bo->meta.format;
@@ -579,12 +628,31 @@ void *gbm_mesa_bo_map(struct bo *bo, struct vma *vma, uint32_t map_flags)
 	}
 
 	auto priv = (GbmMesaBoPriv *)bo->priv;
+	auto drv = gbm_mesa_get_or_init_driver(bo->drv, true);
+	if (drv == nullptr)
+		return MAP_FAILED;
+
+	if (drv->software_gpu) {
+		vma->length = bo->meta.total_size;
+		struct dma_buf_sync sync = { .flags = DMA_BUF_SYNC_START | DMA_BUF_SYNC_RW };
+		if (ioctl(priv->fds[0].Get(), DMA_BUF_IOCTL_SYNC, &sync) != 0)
+			drv_loge("DMA_BUF_SYNC_START failed: %s", strerror(errno));
+
+		void *buf = mmap(0, vma->length, drv_get_prot(map_flags), MAP_SHARED,
+				 priv->fds[0].Get(), 0);
+		if (buf == MAP_FAILED) {
+			drv_loge("Unable to mmap software dma-buf: %s", strerror(errno));
+			struct dma_buf_sync end = { .flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_RW };
+			ioctl(priv->fds[0].Get(), DMA_BUF_IOCTL_SYNC, &end);
+		}
+		return buf;
+	}
+
 	if (!priv->gbm_bo) {
 		if (gbm_mesa_gbm_bo_import(bo) != 0)
 			return MAP_FAILED;
 	}
 
-	auto drv = gbm_mesa_get_or_init_driver(bo->drv, true);
 	auto wr = drv->wrapper;
 
 	vma->length = bo->meta.total_size;
@@ -611,10 +679,19 @@ int gbm_mesa_bo_unmap(struct bo *bo, struct vma *vma)
 		return -EINVAL;
 	}
 
+	auto priv = (GbmMesaBoPriv *)bo->priv;
 	auto drv = gbm_mesa_get_or_init_driver(bo->drv, true);
+	if (drv == nullptr)
+		return -EINVAL;
+	if (drv->software_gpu) {
+		struct dma_buf_sync sync = { .flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_RW };
+		if (ioctl(priv->fds[0].Get(), DMA_BUF_IOCTL_SYNC, &sync) != 0)
+			drv_loge("DMA_BUF_SYNC_END failed: %s", strerror(errno));
+		return munmap(vma->addr, vma->length) == 0 ? 0 : -errno;
+	}
+
 	auto wr = drv->wrapper;
 
-	auto priv = (GbmMesaBoPriv *)bo->priv;
 	if (vma->priv == nullptr || priv->gbm_bo == nullptr) {
 		drv_loge("Buffer internal state is invalid");
 		return -EINVAL;
