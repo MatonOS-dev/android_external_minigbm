@@ -109,6 +109,7 @@ struct GbmMesaDriver {
 
 	UniqueFd gbm_node_fd;
 	UniqueFd gpu_node_fd;
+	bool software_gpu = false;
 };
 
 struct GbmMesaDriverPriv {
@@ -183,12 +184,21 @@ static std::array<std::string, 6> separate_dc_gpu_list = { "v3d",      "vc4",  "
 static bool is_separate_dc_gpu(UniqueFd *out_gpu_fd)
 {
 	UniqueFd gpu_fd;
+	UniqueFd vgem_fd;
 	bool separate_dc = false;
 	std::string gpu_name;
 
 	open_drm_dev(false, [&](int fd, bool is_kms, std::string drm_name) -> bool {
 		if (separate_dc)
 			return false;
+
+		// Keep vgem only as a fallback candidate. If a real render node appears
+		// alongside it, prefer the real GPU so loading vgem can never divert a
+		// hardware-backed system onto llvmpipe.
+		if (drm_name == "vgem") {
+			vgem_fd = UniqueFd(fd);
+			return true;
+		}
 
 		for (const auto &name : separate_dc_gpu_list) {
 			if (drm_name == std::string(name))
@@ -200,7 +210,16 @@ static bool is_separate_dc_gpu(UniqueFd *out_gpu_fd)
 		return true;
 	});
 
+	if (!gpu_fd)
+		gpu_fd = std::move(vgem_fd);
+
 	*out_gpu_fd = std::move(gpu_fd);
+	if (*out_gpu_fd) {
+		drmVersionPtr version = drmGetVersion(out_gpu_fd->Get());
+		gpu_name = version ? version->name : "unknown";
+		if (version)
+			drmFreeVersion(version);
+	}
 
 	drv_logi("Found GPU %s\n", gpu_name.c_str());
 
@@ -216,6 +235,13 @@ static std::shared_ptr<GbmMesaDriver> gbm_mesa_get_or_init_driver(struct driver 
 		gbm_mesa_drv = std::make_unique<GbmMesaDriver>();
 
 		bool look_for_kms = is_separate_dc_gpu(&gbm_mesa_drv->gpu_node_fd);
+		if (gbm_mesa_drv->gpu_node_fd) {
+			drmVersionPtr version = drmGetVersion(gbm_mesa_drv->gpu_node_fd.Get());
+			gbm_mesa_drv->software_gpu =
+			    version && std::string(version->name) == "vgem";
+			if (version)
+				drmFreeVersion(version);
+		}
 
 		if (look_for_kms && !mapper_sphal) {
 			drv_logi("GPU require KMSRO entry, searching for separate KMS driver...\n");
@@ -356,15 +382,22 @@ int gbm_mesa_bo_create2(struct bo *bo, uint32_t width, uint32_t height, uint32_t
 
 	bool sw_mask = unmask64(&use_flags, BO_USE_SW_MASK);
 
+	const bool software_gpu = drv->software_gpu;
 	struct alloc_args alloc_args = {
 		.gbm = drv->gbm_dev,
 		.width = width,
 		.height = height,
 		.drm_format = wr->get_gbm_format(format) ? format : 0,
-		.use_scanout = unmask64(&use_flags, BO_USE_SCANOUT | BO_USE_CURSOR),
-		.force_linear = sw_mask,
+		// vgem is a shmem-backed render device, not a display controller.
+		// Its buffers must stay linear and are presented by drm_hwcomposer on
+		// the real KMS card.
+		.use_scanout =
+		    !software_gpu && unmask64(&use_flags, BO_USE_SCANOUT | BO_USE_CURSOR),
+		.force_linear = sw_mask || software_gpu,
 		.needs_map_stride = sw_mask,
 	};
+	if (software_gpu)
+		unmask64(&use_flags, BO_USE_SCANOUT | BO_USE_CURSOR);
 
 	/* Alignment for RPI4 CSI camera. Since we do not care about other cameras, keep this
 	 * globally for now.
@@ -420,6 +453,11 @@ int gbm_mesa_bo_create2(struct bo *bo, uint32_t width, uint32_t height, uint32_t
 
 	if (test_only)
 		return 0;
+
+	if (software_gpu) {
+		alloc_args.use_scanout = false;
+		alloc_args.force_linear = true;
+	}
 
 	err = wr->alloc(&alloc_args);
 
