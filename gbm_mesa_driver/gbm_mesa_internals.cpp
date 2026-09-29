@@ -486,8 +486,13 @@ int gbm_mesa_bo_create2(struct bo *bo, uint32_t width, uint32_t height, uint32_t
 			return -EINVAL;
 		}
 
+		// llvmpipe samples and rasterizes in whole tiles, so it can read past
+		// the last row of a buffer whose height isn't tile-aligned (taskbar
+		// buffers crashed Launcher3). Pad the allocation to 64-row tiles; the
+		// layout (and total_size) stays exact.
+		uint64_t pad = (uint64_t)stride * (ALIGN(alloc_args.height, 64) - alloc_args.height);
 		struct dma_heap_allocation_data heap_data = {
-		    .len = ALIGN(bo->meta.total_size, 4096),
+		    .len = ALIGN(bo->meta.total_size + pad, 4096),
 		    .fd_flags = O_RDWR | O_CLOEXEC,
 		};
 		if (ioctl(drv->system_heap_fd.Get(), DMA_HEAP_IOCTL_ALLOC, &heap_data) != 0) {
