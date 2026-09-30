@@ -478,8 +478,12 @@ int gbm_mesa_bo_create2(struct bo *bo, uint32_t width, uint32_t height, uint32_t
 		// normal gbm_bo_create() on its fd fails, including for small linear
 		// client targets. System-heap dma-bufs are CPU-mappable by llvmpipe and
 		// PRIME-importable by vgem and the display KMS driver.
-		uint32_t stride = drv_stride_from_format(alloc_args.drm_format,
-							 alloc_args.width, 0);
+		// llvmpipe's rasterizer and samplers use aligned SSE/AVX loads per
+		// row; a stride of exactly width*bpp (e.g. odd-sized icons) makes
+		// them fault with a general-protection SIGSEGV. llvmpipe aligns its
+		// own resources' strides to 64 bytes, so do the same here.
+		uint32_t stride = ALIGN(drv_stride_from_format(alloc_args.drm_format,
+							       alloc_args.width, 0), 64);
 		if (drv_bo_from_format(bo, stride, 1, alloc_args.height,
 				       alloc_args.drm_format) != 0) {
 			drv_loge("Unable to compute system-heap buffer layout");
