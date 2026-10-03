@@ -11,6 +11,7 @@
 
 #include <functional>
 #include <memory>
+#include <map>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -81,6 +82,14 @@ class cros_gralloc_driver
 	std::mutex mutex_;
 	std::unordered_map<uint32_t, std::unique_ptr<cros_gralloc_buffer>> buffers_;
 	std::unordered_map<cros_gralloc_handle_t, cros_gralloc_imported_handle_info> handles_;
+
+	/*
+	 * Buffers imported from handles with id 0: dma-bufs allocated outside gralloc (e.g. by a
+	 * Wayland client) and wrapped in a handle by the importer. The allocator never assigns
+	 * id 0, so these are keyed by the identity of their first plane's dma-buf instead. The
+	 * buffer keeps its handle's fds open, so the key cannot be reused while it is tracked.
+	 */
+	std::map<std::pair<dev_t, ino_t>, std::unique_ptr<cros_gralloc_buffer>> external_buffers_;
 
 	/* TODO(b/242184599): remove after SwiftShader is moved to the host. */
 	const bool is_running_with_software_rendering_ = false;

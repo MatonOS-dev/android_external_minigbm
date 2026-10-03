@@ -109,6 +109,14 @@ class cros_gralloc_buffer
 
 	/* Optional additional shared memory region attached to some gralloc buffers. */
 	mutable void *reserved_region_addr_ = nullptr;
+
+	/*
+	 * Metadata of an external buffer (id 0), which has no reserved region: kept in this
+	 * process only, starting from defaults.
+	 */
+	mutable std::unique_ptr<struct cros_gralloc_buffer_metadata> local_metadata_;
+
+	struct cros_gralloc_buffer_metadata *external_metadata() const;
 };
 
 #endif

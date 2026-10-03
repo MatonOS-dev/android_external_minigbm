@@ -12,6 +12,7 @@
 #include <hardware/gralloc.h>
 #include <linux/dma-buf.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <syscall.h>
 #include <xf86drm.h>
 
@@ -435,8 +436,24 @@ int32_t cros_gralloc_driver::retain(buffer_handle_t handle)
 
 	cros_gralloc_buffer *buffer = nullptr;
 
-	auto buffer_it = buffers_.find(id);
-	if (buffer_it != buffers_.end()) {
+	std::pair<dev_t, ino_t> external_key;
+	const bool external = id == 0;
+	if (external) {
+		struct stat st;
+		if (hnd->num_planes == 0 || hnd->fds[0] < 0 || fstat(hnd->fds[0], &st)) {
+			ALOGE("Failed to import external buffer: invalid plane fd.");
+			return -EINVAL;
+		}
+		external_key = std::make_pair(st.st_dev, st.st_ino);
+	}
+
+	auto buffer_it = external ? buffers_.end() : buffers_.find(id);
+	auto external_it =
+	    external ? external_buffers_.find(external_key) : external_buffers_.end();
+	if (external_it != external_buffers_.end()) {
+		buffer = external_it->second.get();
+		buffer->increase_refcount();
+	} else if (buffer_it != buffers_.end()) {
 		// The underlying buffer (as multiple handles can refer to the same buffer)
 		// has already been imported into this process but the given handle has not
 		// yet been registered. Increase the buffer reference count (here) and start
@@ -468,7 +485,10 @@ int32_t cros_gralloc_driver::retain(buffer_handle_t handle)
 			return -1;
 		}
 		buffer = scoped_buffer.get();
-		buffers_.emplace(id, std::move(scoped_buffer));
+		if (external)
+			external_buffers_.emplace(external_key, std::move(scoped_buffer));
+		else
+			buffers_.emplace(id, std::move(scoped_buffer));
 	}
 
 	struct cros_gralloc_imported_handle_info hnd_info = {
@@ -499,7 +519,16 @@ int32_t cros_gralloc_driver::release(buffer_handle_t handle)
 		handles_.erase(hnd);
 
 	if (buffer->decrease_refcount() == 0) {
-		buffers_.erase(buffer->get_id());
+		if (buffer->get_id() == 0) {
+			for (auto it = external_buffers_.begin(); it != external_buffers_.end(); ++it) {
+				if (it->second.get() == buffer) {
+					external_buffers_.erase(it);
+					break;
+				}
+			}
+		} else {
+			buffers_.erase(buffer->get_id());
+		}
 	}
 
 	return 0;

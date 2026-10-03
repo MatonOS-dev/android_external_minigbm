@@ -7,6 +7,7 @@
 #include "cros_gralloc_buffer.h"
 
 #include <assert.h>
+#include <cstdio>
 #include <sys/mman.h>
 
 #include <cutils/native_handle.h>
@@ -478,8 +479,25 @@ int32_t cros_gralloc_buffer::get_client_reserved_region(void **client_reserved_r
 	return 0;
 }
 
+struct cros_gralloc_buffer_metadata *cros_gralloc_buffer::external_metadata() const
+{
+	if (hnd_->id != 0 || hnd_->reserved_region_size != 0)
+		return nullptr;
+
+	if (!local_metadata_) {
+		local_metadata_ = std::make_unique<struct cros_gralloc_buffer_metadata>();
+		snprintf(local_metadata_->name, sizeof(local_metadata_->name), "external-dmabuf");
+	}
+	return local_metadata_.get();
+}
+
 int32_t cros_gralloc_buffer::get_metadata(struct cros_gralloc_buffer_metadata **metadata)
 {
+	if (auto local = external_metadata()) {
+		*metadata = local;
+		return 0;
+	}
+
 	void *metadata_addr;
 	uint64_t metadata_region_size;
 	int32_t ret = get_reserved_region(&metadata_addr, &metadata_region_size);
@@ -498,6 +516,11 @@ int32_t cros_gralloc_buffer::get_metadata(struct cros_gralloc_buffer_metadata **
 int32_t
 cros_gralloc_buffer::get_metadata(const struct cros_gralloc_buffer_metadata **metadata) const
 {
+	if (auto local = external_metadata()) {
+		*metadata = local;
+		return 0;
+	}
+
 	void *metadata_addr;
 	uint64_t metadata_region_size;
 	int32_t ret = get_reserved_region(&metadata_addr, &metadata_region_size);
