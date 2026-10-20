@@ -30,42 +30,9 @@
 
 #ifdef DRV_EXTERNAL
 extern struct backend *init_external_backend();
-extern const struct backend backend_virtgpu;
-
-/* Use minigbm's native virtio backend when this DRM fd is virtio_gpu, while
- * keeping the Mesa GBM backend as the fallback for every other DRM driver.
- */
-static int drv_virtgpu_external_init(struct driver *drv)
-{
-	int ret = backend_virtgpu.init(drv);
-	if (!ret)
-		return 0;
-
-	/* Some virtio_gpu hosts do not expose a usable minigbm virtgpu backend.
-	 * Preserve the existing GBM path in that case.
-	 */
-	drv->backend = init_external_backend();
-	if (!drv->backend)
-		return ret;
-
-	return drv->backend->init ? drv->backend->init(drv) : 0;
-}
-
-static const struct backend backend_virtgpu_external = {
-	.name = "virtio_gpu",
-	.init = drv_virtgpu_external_init,
-};
 
 static const struct backend *drv_get_backend(int fd)
 {
-	drmVersionPtr drm_version = drmGetVersion(fd);
-	if (drm_version && !strcmp(drm_version->name, backend_virtgpu.name)) {
-		drmFreeVersion(drm_version);
-		return &backend_virtgpu_external;
-	}
-	if (drm_version)
-		drmFreeVersion(drm_version);
-
 	return init_external_backend();
 }
 #else
